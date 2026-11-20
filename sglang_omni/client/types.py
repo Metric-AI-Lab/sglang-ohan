@@ -1,0 +1,296 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Client request, streaming, and result types."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Literal, TypedDict
+
+
+class TokenUsageDict(TypedDict):
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+
+
+class UsageInfoDict(TokenUsageDict, total=False):
+    engine_time_s: float
+
+
+# note (Yucheng Hu): finish reason reported on speech surfaces when the model
+# did not say how generation ended.
+UNKNOWN_FINISH_REASON = "unknown"
+
+
+@dataclass(frozen=True, kw_only=True)
+class DiarizationSegment:
+    """One speaker's active interval, in seconds from the recording start."""
+
+    start: float
+    end: float
+    speaker: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class DiarizationResult:
+    """Standalone speaker activity, with overlapping intervals permitted."""
+
+    duration: float
+    segments: list[DiarizationSegment]
+
+
+DiarizationOperation = Literal["open", "append", "finish", "close", "reset"]
+
+
+@dataclass
+class Message:
+    """Chat-style message."""
+
+    role: str
+    content: object
+
+    def to_dict(self) -> dict[str, object]:
+        return {"role": self.role, "content": self.content}
+
+
+@dataclass
+class UsageInfo:
+    """Token usage details."""
+
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    engine_time_s: float | None = None
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object] | None) -> "UsageInfo | None":
+        if not data:
+            return None
+        else:
+            pass
+        return cls(
+            prompt_tokens=data.get("prompt_tokens"),
+            completion_tokens=data.get("completion_tokens"),
+            total_tokens=data.get("total_tokens"),
+            engine_time_s=data.get("engine_time_s"),
+        )
+
+    def to_dict(self) -> UsageInfoDict:
+        d: UsageInfoDict = {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
+        if self.engine_time_s is not None:
+            d["engine_time_s"] = self.engine_time_s
+        else:
+            pass
+        return d
+
+
+@dataclass
+class SamplingParams:
+    """Sampling configuration."""
+
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    repetition_penalty: float | None = None
+    stop: list[str] = field(default_factory=list)
+    stop_token_ids: list[int] = field(default_factory=list)
+    seed: int | None = None
+    max_new_tokens: int | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        # note (ratish): a field the caller left unset stays out, so the stage
+        # request builder applies its own model default.
+        values: dict[str, object] = {
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+            "min_p": self.min_p,
+            "repetition_penalty": self.repetition_penalty,
+            "seed": self.seed,
+            "max_new_tokens": self.max_new_tokens,
+        }
+        return {
+            **{name: value for name, value in values.items() if value is not None},
+            "stop": list(self.stop),
+            "stop_token_ids": list(self.stop_token_ids),
+        }
+
+
+@dataclass
+class GenerateRequest:
+    """Client-level request (API-agnostic)."""
+
+    model: str | None = None
+
+    prompt: str | dict[str, object] | None = None
+    prompt_token_ids: list[int] | None = None
+    messages: list[Message] | None = None
+
+    sampling: SamplingParams = field(default_factory=SamplingParams)
+    stage_sampling: dict[str, SamplingParams] | None = None
+    stage_params: dict[str, dict[str, object]] | None = None
+    extra_params: dict[str, object] = field(default_factory=dict)
+    stream: bool = True
+    max_tokens: int | None = None
+
+    # Multi-modal support
+    output_modalities: list[str] | None = None
+    multimodal_train_inputs: dict[str, object] | None = None
+
+    metadata: dict[str, object] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "model": self.model,
+            "prompt": self.prompt,
+            "prompt_token_ids": self.prompt_token_ids,
+            "messages": [m.to_dict() for m in self.messages] if self.messages else None,
+            "sampling": self.sampling.to_dict(),
+            "stage_sampling": (
+                {key: params.to_dict() for key, params in self.stage_sampling.items()}
+                if self.stage_sampling
+                else None
+            ),
+            "stage_params": self.stage_params,
+            "extra_params": dict(self.extra_params),
+            "stream": self.stream,
+            "max_tokens": self.max_tokens,
+            "output_modalities": self.output_modalities,
+            "multimodal_train_inputs": self.multimodal_train_inputs,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass
+class GenerateChunk:
+    """Streaming chunk from the client."""
+
+    request_id: str
+    index: int = 0
+    token_ids: list[int] = field(default_factory=list)
+    text: str = ""
+    logprobs: list[float] | None = None
+    output_token_logprobs: list[list[float | int]] | None = None
+    omni_rollout: dict[str, object] | None = None
+    finish_reason: str | None = None
+    # note (Yucheng Hu): None preserves typed producers; empty marks a synthetic terminal reason.
+    model_finish_reason: str | None = None
+    usage: UsageInfo | None = None
+    weight_version: str | None = None
+    stage_id: int | None = None
+    stage_name: str | None = None
+    modality: str = "text"
+    language: str | None = None
+    audio_data: object = None
+    sample_rate: int | None = None
+    diarization: DiarizationResult | None = None
+
+    @property
+    def reported_finish_reason(self) -> str:
+        if self.model_finish_reason is None:
+            return self.finish_reason or ""
+        else:
+            return self.model_finish_reason
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "index": self.index,
+            "token_ids": list(self.token_ids),
+            "text": self.text,
+            "logprobs": self.logprobs,
+            "output_token_logprobs": self.output_token_logprobs,
+            "omni_rollout": self.omni_rollout,
+            "finish_reason": self.finish_reason,
+            "model_finish_reason": self.reported_finish_reason,
+            "usage": self.usage.to_dict() if self.usage else None,
+            "weight_version": self.weight_version,
+            "stage_id": self.stage_id,
+            "stage_name": self.stage_name,
+            "modality": self.modality,
+            "language": self.language,
+            "audio_data": self.audio_data,
+            "sample_rate": self.sample_rate,
+        }
+
+
+class AbortLevel(Enum):
+    """Abort severity."""
+
+    SOFT = "soft"
+    HARD = "hard"
+
+
+@dataclass
+class AbortResult:
+    """Abort response from the client."""
+
+    success: bool
+    level_applied: AbortLevel
+    partial_output: GenerateChunk | None = None
+
+
+# ---------------------------------------------------------------------------
+# High-level result types
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CompletionAudio:
+    """Audio data from a non-streaming completion."""
+
+    id: str
+    data: str  # base64
+    transcript: str | None = None
+
+
+@dataclass
+class CompletionResult:
+    """Result of a non-streaming completion call."""
+
+    request_id: str
+    text: str
+    audio: CompletionAudio | None = None
+    finish_reason: str = "stop"
+    usage: UsageInfo | None = None
+    output_token_logprobs: list[list[float | int]] | None = None
+    omni_rollout: dict[str, object] | None = None
+    weight_version: str | None = None
+    language: str | None = None
+    diarization: DiarizationResult | None = None
+
+
+@dataclass
+class CompletionStreamChunk:
+    """A single chunk from a streaming completion call."""
+
+    request_id: str
+    text: str = ""
+    modality: str = "text"
+    audio_b64: str | None = None  # already base64-encoded
+    finish_reason: str | None = None
+    usage: UsageInfo | None = None
+    stage_name: str | None = None
+
+
+@dataclass
+class SpeechResult:
+    """Result of a text-to-speech call."""
+
+    audio_bytes: bytes
+    mime_type: str
+    format: str
+    sample_rate: int | None = None
+    usage: UsageInfo | None = None
+    finish_reason: str = UNKNOWN_FINISH_REASON
+
+
+class ClientError(Exception):
+    """Error raised by the Client layer."""
