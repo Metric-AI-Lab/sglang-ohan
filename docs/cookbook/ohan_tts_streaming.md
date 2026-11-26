@@ -1,6 +1,6 @@
 # OhanTTS-Streaming
 
-Model: [Metric-AI/OhanTTS-Streaming-v0.1](https://huggingface.co/Metric-AI/OhanTTS-Streaming-v0.1).
+Model: [Metric-AI/OhanTTS-Streaming-v0.1].
 
 ## Quick start
 
